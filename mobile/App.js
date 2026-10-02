@@ -1,32 +1,78 @@
-import React, { useState } from 'react';
-import { StyleSheet, Text, View, FlatList, SafeAreaView } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import { StyleSheet, Text, View, FlatList, ActivityIndicator } from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { API_URL } from './config';
+import { io } from 'socket.io-client';
+
+// Create socket connection outside the component so it persists across renders
+const socket = io(API_URL, {
+  autoConnect: false, // We'll connect it inside useEffect
+});
 
 export default function App() {
-  // Hardcoded array of leads for the static screen
-  const [leads, setLeads] = useState([
-    {
-      metaLeadId: 'lead_1',
-      name: 'Alice Smith',
-      email: 'alice@example.com',
-      phone: '+1 555-0101',
-      status: 'NEW',
-    },
-    {
-      metaLeadId: 'lead_2',
-      name: 'Bob Jones',
-      email: 'bob@example.com',
-      phone: '+1 555-0102',
-      status: 'CONTACTED',
-    },
-    {
-      metaLeadId: 'lead_3',
-      name: 'Charlie Brown',
-      email: 'charlie@example.com',
-      phone: '+1 555-0103',
-      status: 'NEW',
-    },
-  ]);
+  const [leads, setLeads] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [isConnected, setIsConnected] = useState(false);
+
+  const fetchLeads = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const response = await fetch(`${API_URL}/leads`);
+      if (!response.ok) {
+        throw new Error('Failed to fetch leads');
+      }
+      const data = await response.json();
+      setLeads(data);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    // Initial fetch
+    fetchLeads();
+
+    // Connect socket
+    socket.connect();
+
+    // Socket events
+    const onConnect = () => {
+      setIsConnected(true);
+      // Refetch to catch up on any missed events while disconnected
+      fetchLeads();
+    };
+
+    const onDisconnect = () => {
+      setIsConnected(false);
+    };
+
+    const onNewLead = (newLead) => {
+      setLeads((prevLeads) => {
+        // Prevent duplicates
+        if (prevLeads.some((lead) => lead.metaLeadId === newLead.metaLeadId)) {
+          return prevLeads;
+        }
+        // Prepend the new lead
+        return [newLead, ...prevLeads];
+      });
+    };
+
+    socket.on('connect', onConnect);
+    socket.on('disconnect', onDisconnect);
+    socket.on('newLead', onNewLead);
+
+    // Cleanup
+    return () => {
+      socket.off('connect', onConnect);
+      socket.off('disconnect', onDisconnect);
+      socket.off('newLead', onNewLead);
+      socket.disconnect();
+    };
+  }, []);
 
   const renderItem = ({ item }) => (
     <View style={styles.card}>
@@ -42,17 +88,33 @@ export default function App() {
   );
 
   return (
-    <SafeAreaView style={styles.container}>
-      <Text style={styles.header}>Leads</Text>
-      <FlatList
-        data={leads}
-        // keyExtractor needs a stable and unique field. 
-        // metaLeadId is unique and stable (doesn't change on re-renders, unlike array index).
-        keyExtractor={(item) => item.metaLeadId}
-        renderItem={renderItem}
-        contentContainerStyle={styles.list}
-      />
-    </SafeAreaView>
+    <SafeAreaProvider>
+      <SafeAreaView style={styles.container}>
+        <View style={styles.headerContainer}>
+          <Text style={styles.header}>Leads</Text>
+          <View style={[styles.statusIndicator, { backgroundColor: isConnected ? 'green' : 'red' }]} />
+        </View>
+
+        {loading && leads.length === 0 ? (
+          <ActivityIndicator size="large" color="#0000ff" style={styles.center} />
+        ) : error && leads.length === 0 ? (
+          <View style={styles.center}>
+            <Text style={styles.errorText}>Error: {error}</Text>
+          </View>
+        ) : leads.length === 0 ? (
+          <View style={styles.center}>
+            <Text style={styles.emptyText}>No leads found.</Text>
+          </View>
+        ) : (
+          <FlatList
+            data={leads}
+            keyExtractor={(item) => item.metaLeadId}
+            renderItem={renderItem}
+            contentContainerStyle={styles.list}
+          />
+        )}
+      </SafeAreaView>
+    </SafeAreaProvider>
   );
 }
 
@@ -61,12 +123,35 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#f5f5f5',
   },
+  headerContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    marginTop: 16,
+    marginBottom: 8,
+  },
   header: {
     fontSize: 24,
     fontWeight: 'bold',
-    marginHorizontal: 16,
-    marginTop: 16,
-    marginBottom: 8,
+  },
+  statusIndicator: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+  },
+  center: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  errorText: {
+    color: 'red',
+    fontSize: 16,
+  },
+  emptyText: {
+    fontSize: 16,
+    color: '#666',
   },
   list: {
     padding: 16,
@@ -98,10 +183,10 @@ const styles = StyleSheet.create({
     borderRadius: 12,
   },
   badgeNew: {
-    backgroundColor: '#e3f2fd', // light blue
+    backgroundColor: '#e3f2fd',
   },
   badgeContacted: {
-    backgroundColor: '#e8f5e9', // light green
+    backgroundColor: '#e8f5e9',
   },
   badgeText: {
     fontSize: 12,
